@@ -50,7 +50,7 @@ struct connection {
   	struct ibv_qp *qp;
 
   	int connected;
-  
+
   	struct ibv_mr *send_mr;
   	struct ibv_mr *rdma_local_mr;
   	struct message *send_msg;
@@ -86,9 +86,11 @@ private:
 	uint32_t back_log = 10;
 	const int QUEUE_SIZE = 10;
 	const int RDMA_BUFFER_SIZE = 1024*1024*200 + 12;
+    // The address from which to serve remote memory requests.
+    const void* test_addr;
 
 	// server variables
-	int port_ = 5001;
+	int port_ = 5001; // ignore, gets overwritten
 	Server *admin_server = new Server(port_);
 	Server *log_server = new Server(port_ + 1000);
 
@@ -110,7 +112,8 @@ public:
 	// common functions to build rdma connection
 	MemoryServer();
 	// MemoryServer::MemoryServer(uint16_t port) {
-	MemoryServer(const char* port);
+	// MemoryServer(const char* port);
+    MemoryServer(const char* port, void* test_addr);
 
 	void CreateConnection();
 	void callJoin();

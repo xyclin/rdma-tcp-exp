@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 #define SENDER_PORT 3490
-#define SENDER_IP "172.19.18.72"
+#define SENDER_IP "10.0.3.7"
 #define SIZE_TO_RECV 10
 
 int main(int argc, char *argv[]) {
@@ -41,7 +41,7 @@ int main(int argc, char *argv[]) {
    //send  ack
    send(sockfd,&ackChar,sizeof(char),0);
   }
-  else{ 
+  else{
    perror("Receive error");
    exit(1);
   }

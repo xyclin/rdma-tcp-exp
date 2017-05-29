@@ -4,21 +4,31 @@
 
 #include <map>
 
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <iostream>
+#include <limits>
+#include <vector>
+
 using namespace Draco;
 using namespace std;
 
 namespace Draco {
 
-Coordinator::Coordinator(char *address, char *port, int node_id) : node_id(node_id) {
+Coordinator::Coordinator(char *address, char *port, int node_id, void* test_addr) :
+node_id(node_id), test_addr(test_addr) {
 	c = new client();
 	c->port = port;
 	c->address = address;
-	
+
 	if (debug_level >= 1) {
 		printf("address is : %s\n", c->address);
-		printf("port is : %s\n", c->port);	
+		printf("port is : %s\n", c->port);
 	}
-	
+
 	if (debug_level >= 2)
 		printf("setting up client variables\n");
 
@@ -37,10 +47,10 @@ Coordinator::Coordinator(char *address, char *port, int node_id) : node_id(node_
 	c->mutex_conn = &mutex_conn_new;
 
 	c->cv_conn = &cv_conn_new;
-	
+
 	//initialize you cond vars and mutex
 	// int temp = 0;
-	
+
 	c->connected = new int();
 	*(c->connected) = 0;
 	freeaddrinfo(c->addr);
@@ -63,7 +73,7 @@ int Coordinator::RdmaRead(int offset, int size, char* buffer) {
     struct connection * conn = ((struct connection *)c->conn->context);
     return rdma_read(conn, offset, size, buffer);
 }
-    
+
 int Coordinator::RdmaCompSwap(int offset, uint64_t compare, uint64_t swap, char* buffer){
     if (debug_level >= 1)
 		printf("RDMA CompSwap\n");
@@ -87,7 +97,7 @@ int Coordinator::RdmaWrite(int offset, int size, char* buffer){
 
 //     std::unique_lock<std::mutex> mlock(mutex_);
 //     queue_->push(workReq);
-    
+
 //     RdmaRead(workReq->getOffset(), workReq->getSize(), workReq->getValue());
 
 //     mlock.unlock();
@@ -95,13 +105,13 @@ int Coordinator::RdmaWrite(int offset, int size, char* buffer){
 
 //     return 1;
 // }
-    
+
 // int Coordinator::RdmaCompSwap(WorkRequest * workReq){
 // 	workReq->setWorkRequestCommand(ACS);
 
 //     std::unique_lock<std::mutex> mlock(mutex_);
 //     queue_->push(workReq);
-    
+
 //     RdmaCompSwap(workReq->getOffset(), workReq->getCompare(), workReq->getSwap(), workReq->getValue());
 
 //     mlock.unlock();
@@ -115,7 +125,7 @@ int Coordinator::RdmaWrite(int offset, int size, char* buffer){
 
 //     std::unique_lock<std::mutex> mlock(mutex_);
 //     queue_->push(workReq);
-    
+
 //     RdmaWrite(workReq->getOffset(), workReq->getSize(), workReq->getValue());
 
 //     mlock.unlock();
@@ -125,9 +135,9 @@ int Coordinator::RdmaWrite(int offset, int size, char* buffer){
 
 int Coordinator::CreateConnection() {
     event_thread = new std::thread(&Coordinator::event_loop_client, this, (void*)NULL );
-    
+
     pthread_mutex_lock( c->mutex_conn );
-    
+
     while (  *(c->connected) == 0) {
     	if (this->connected_ == 1) {
     		return 1;
@@ -135,9 +145,9 @@ int Coordinator::CreateConnection() {
         pthread_cond_wait((c->cv_conn), ( c->mutex_conn ));
     }
     pthread_mutex_unlock( ( c->mutex_conn ));
-    
+
 //    printf("Connection established and ready to do rdma operations\n");
-    
+
     return (this->connected_);
 }
 
@@ -177,7 +187,7 @@ int Coordinator::on_event(struct rdma_cm_event *event) {
 		printf("unreachable server, possible network partition\n");
 	else if (event->event == RDMA_CM_EVENT_REJECTED) {
 		printf("rejected, port closed\n");
-		// printf("%d\n", event->status);   
+		// printf("%d\n", event->status);
 	}
 	else if (event-> event == RDMA_CM_EVENT_ADDR_ERROR)
 		printf("RDMA_CM_EVENT_ADDR_ERROR\n");
@@ -233,13 +243,13 @@ int Coordinator::on_disconnect(struct rdma_cm_id *id) {
 
 
 int Coordinator::on_route_resolved(struct rdma_cm_id *id) {
-	
+
 	struct rdma_conn_param cm_params;
 	// printf("route resolving.\n");
 	build_params(&cm_params);
 	TEST_NZ(rdma_connect(id, &cm_params));
 //	DEBUG("route resolved\n");
-	
+
 	return 0;
 }
 
@@ -259,7 +269,7 @@ void Coordinator::build_connection(struct rdma_cm_id *id, client *c) {
 
 	TEST_NZ(rdma_create_qp(id, s_ctx->pd, &qp_attr));
 	conn = (struct connection *)malloc(sizeof(struct connection));
-	
+
 	id->context = conn;
 	conn->id = id;
 	conn->qp = id->qp;
@@ -329,11 +339,11 @@ void * Coordinator::poll_cq(void * ctx) { // check this for void* ctx
 	void* x = static_cast<void*> (s_ctx->ctx);
 //	DEBUG("poll_cq");
 	while (1) {
-		
+
 		TEST_NZ(ibv_get_cq_event(s_ctx->comp_channel, &cq, &x));
 		ibv_ack_cq_events(cq, 1);
 		TEST_NZ(ibv_req_notify_cq(cq, 0));
-		
+
 		while (ibv_poll_cq(cq, 1, &wc)) {
 			on_completion(&wc);
 		}
@@ -363,25 +373,26 @@ void Coordinator::register_memory(struct connection *conn)
 	conn->recv_msg = static_cast<struct message*>(malloc(sizeof(struct message)));
 
 	conn->rdma_remote_region = static_cast<char*>(calloc(1, RDMA_BUFFER_SIZE));
-	conn->rdma_local_region  = static_cast<char*>(calloc(1, RDMA_BUFFER_SIZE));
+	// conn->rdma_local_region  = static_cast<char*>(calloc(1, RDMA_BUFFER_SIZE));
+    conn->rdma_local_region = (char*)test_addr;
 
 	TEST_Z(conn->recv_mr = ibv_reg_mr(
-	  s_ctx->pd, 
-	  conn->recv_msg, 
-	  sizeof(struct message), 
+	  s_ctx->pd,
+	  conn->recv_msg,
+	  sizeof(struct message),
 	  IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC));
 
 
 	TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
-	  s_ctx->pd, 
-	  conn->rdma_remote_region, 
-	  RDMA_BUFFER_SIZE, 
+	  s_ctx->pd,
+	  conn->rdma_remote_region,
+	  RDMA_BUFFER_SIZE,
 	  IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC));
 
 	TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
-	  s_ctx->pd, 
-	  conn->rdma_local_region, 
-	  RDMA_BUFFER_SIZE, 
+	  s_ctx->pd,
+	  conn->rdma_local_region,
+	  RDMA_BUFFER_SIZE,
 	  IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC));
 }
 
@@ -389,9 +400,9 @@ void Coordinator::on_connect(void *context)
 {
 	struct connection * conn = ((struct connection *)context);
 	pthread_mutex_lock((conn->mutex_conn));
-	
+
 	*(conn->connected) = 1;
-	
+
 	pthread_cond_signal((conn->cv_conn));
 	pthread_mutex_unlock((conn->mutex_conn));
 }
@@ -444,7 +455,7 @@ void Coordinator::on_connect(void *context)
 // 			// cond_.wait(mlock);
 // 			return;
 // 		}
-		
+
 // 		WorkRequest* item = queue_->front();
 // 		queue_->pop();
 
@@ -463,7 +474,7 @@ void Coordinator::on_connect(void *context)
    	// {
     	// std::unique_lock<std::mutex> mlock(mutex_);
     	// memcpy(buffer, conn->rdma_local_region, 1024);
-    	op_done=1; // change to accomodate multiple ops together	
+    	op_done=1; // change to accomodate multiple ops together
     	// mlock.unlock();
     }
   }
@@ -496,13 +507,13 @@ void Coordinator::destroy_connection(void *context)
     struct ibv_sge sge;
 
    	memset(&wr, 0, sizeof(wr));
-      
+
     wr.wr_id = (uintptr_t)conn;
     wr.opcode = IBV_WR_RDMA_READ;
     wr.sg_list = &sge;
     wr.num_sge = 1;
     wr.send_flags = IBV_SEND_SIGNALED;
-    wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr + offset; 
+    wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr + offset;
     wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
     sge.addr = (uintptr_t)conn->rdma_local_region;
@@ -510,9 +521,9 @@ void Coordinator::destroy_connection(void *context)
     sge.lkey = conn->rdma_local_mr->lkey;
 
     ibv_post_send(conn->qp, &wr, &bad_wr);
-    
+
     while(op_done == 0) {}
-    
+
     if (op_done == 1) {
       // do memcpy
       // printf("error was not null\n");
@@ -532,7 +543,7 @@ void Coordinator::destroy_connection(void *context)
     struct ibv_sge sge;
 
    	memset(&wr, 0, sizeof(wr));
-      
+
     wr.wr_id = (uintptr_t)conn;
     wr.opcode = IBV_WR_RDMA_WRITE;
     wr.sg_list = &sge;
@@ -544,7 +555,7 @@ void Coordinator::destroy_connection(void *context)
     sge.addr = (uintptr_t)conn->rdma_remote_region;
     sge.length = size;
     sge.lkey = conn->rdma_remote_mr->lkey;
-    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));	
+    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
 
     while(op_done == 0) {
     }
@@ -581,7 +592,7 @@ void Coordinator::destroy_connection(void *context)
     wr.sg_list = &sge;
     wr.num_sge = 1;
     wr.send_flags = IBV_SEND_SIGNALED;
-    
+
     wr.wr.atomic.remote_addr = (uintptr_t)conn->peer_mr.addr + offset;
     wr.wr.atomic.rkey = conn->peer_mr.rkey;
     wr.wr.atomic.compare_add = compare;
@@ -617,8 +628,306 @@ void Coordinator::destroy_connection(void *context)
 
  //    bool Coordinator::isEmpty() {
  //        return (queue_->empty());
- //    }	
+ //    }
 } // namespace
+
+template <class T>
+class MyAlloc {
+public:
+    // type definitions
+    typedef T        value_type;
+    typedef T*       pointer;
+    typedef const T* const_pointer;
+    typedef T&       reference;
+    typedef const T& const_reference;
+    typedef std::size_t    size_type;
+    typedef std::ptrdiff_t difference_type;
+    // rebind allocator to type U
+    template <class U>
+    struct rebind {
+        typedef MyAlloc<U> other;
+    };
+    // return address of values
+    pointer address (reference value) const {
+        return &value;
+    }
+    const_pointer address (const_reference value) const {
+        return &value;
+    }
+    /* constructors and destructor
+     * - nothing to do because the allocator has no state
+     */
+
+    MyAlloc() throw() {
+        std::cerr << "NOARGS MYALLOC CALLED" << std::endl;
+    }
+    // MyAlloc() throw() {
+    MyAlloc(void* pool_addr, size_t pool_size, void* next) throw() {
+        // (Note: This is just for testing memory access patterns.
+        // When we actually make this, we should have the constructor
+        // access some pool structure, which determines the specific
+        // addresses.)
+        std::cerr << "Creating custom allocator using ";
+        std::cerr << "addr " << pool_addr << ", ";
+        std::cerr << "size " << pool_size << ", ";
+        std::cerr << "free memory beginning at " << next << std::endl;
+
+        this->pool_addr = pool_addr;
+        this->pool_size = pool_size;
+        this->next = next;
+    }
+
+    MyAlloc(const MyAlloc& other) throw() {
+        pool_addr = other.pool_addr;
+        pool_size = other.pool_size;
+        next = other.next;
+    }
+
+    template <class U> MyAlloc (const MyAlloc<U>&) throw() {}
+
+    ~MyAlloc() throw() {}
+
+    // return maximum number of elements that can be allocated
+    size_type max_size () const throw() {
+        return pool_size / sizeof(T);
+    }
+
+    // allocate but don't initialize num elements of type T
+    pointer allocate (size_type num, const void* = 0) {
+        // print message and allocate memory with global new
+        std::cerr << "Allocating " << num << " element(s) "
+                  << " of size " << sizeof(T) << std::endl;
+        std::cerr << "pool_addr: " << pool_addr << std::endl;
+        std::cerr << "pool_size: " << pool_size << std::endl;
+        std::cerr << "next is currently " << next << std::endl;
+        pointer ret = (pointer)(next);
+        size_t total_size = (size_t)(num * sizeof(T));
+        next = (void*)((char*)next + total_size);
+
+        std::cerr << "Items allocated at: " << (void*)ret << std::endl;
+        return ret;
+    }
+    // initialize elements of allocated storage p with value value
+    void construct (pointer p, const T& value) {
+        // initialize memory with placement new
+        new((void*)p) T(value);
+    }
+
+    // destroy elements of initialized storage p
+    void destroy (pointer p) {
+        // destroy objects by calling their destructor
+        p->~T();
+    }
+    // deallocate storage p of deleted elements
+    void deallocate (pointer p, size_type num) {
+        // print message and deallocate memory with global delete
+        std::cerr << "Deallocating " << num << " element(s)"
+                  << " of size " << sizeof(T)
+                  << " at " << (void*)p << std::endl;
+        std::cerr << "(This is currently a no-op.)" << std::endl;
+    }
+
+private:
+    void* pool_addr;
+    size_t pool_size;
+    void* next;
+};
+
+// Disable equality comparisons for now.
+template <class T1, class T2>
+bool operator== (const MyAlloc<T1>&,
+                 const MyAlloc<T2>&) throw() {
+    return false;
+}
+template <class T1, class T2>
+bool operator!= (const MyAlloc<T1>&,
+                 const MyAlloc<T2>&) throw() {
+    return true;
+}
+
+
+class AddressSpaceManager {
+    // This class handles requests to allocate moveable blocks of memory.
+    // Obviously currently it doesn't do much other than track mmaps,
+    // but in the future this will need to interface with central coordination
+    // (or is this just the client side interface FOR central coordination?)
+    // Also, other open design questions are
+    // - how do we track ownership of regions, and
+    // - should we track contents of regions here, or delegate that to the
+    // users? (At the very least, another level of indirection seems
+    // appropriate; there is no reason the memory coordinator should have to
+    // know about the contents.)
+    // TODO: eventually make this a singleton?
+
+    typedef void* pointer_t;
+
+    // Linked list of used memory blocks for coordinating memory.
+    // Note; this is a nondistributed implementation just for testing.
+    // In any real setup, almost all of the methods will probably be calls
+    // to a centralized coordination server.
+    class MemoryNode {
+    public:
+        MemoryNode* next;
+            // If this is null, then this is the FIXED ENDING BLOCK.
+            // Do not allocate memory after this block.
+        pointer_t addr;
+        size_t size;
+
+        MemoryNode(MemoryNode* next, pointer_t addr, size_t size) :
+            next(next), addr(addr), size(size) {}
+
+        // Within this linked list of memory nodes,
+        // place a node for the specified amount of memory
+        // at the specified address.
+        // If addr is 0, place memory anywhere.
+        // Returns the address at which memory was placed,
+        // or 0 if we failed to place the address
+        // (which happens if memory was full or address not available).
+        pointer_t place_address(size_t req_size, pointer_t req_addr) {
+            // First, errors.
+            // Note we recursively call this on suffixes of the linked list.
+            bool end_of_memory = next == NULL;
+            bool negative_req_addr = req_addr < 0;
+            bool req_addr_too_small = (req_addr > 0) and (req_addr < addr);
+            if (end_of_memory or negative_req_addr or req_addr_too_small) {
+                return (pointer_t) 0;
+            }
+            // We call this on the head (recursively), so the question is:
+            // Is the memory to allocate between this node and the next node?
+            // (This is vacuously true if we did not specify an address.)
+            bool req_addr_goes_here = (
+                req_addr > 0 and req_addr >= addr and req_addr < next->addr);
+            bool no_addr_specified = req_addr == 0;
+
+            if (req_addr_goes_here or no_addr_specified) {
+                // Okay, let's try allocating here.
+                // Is there enough space?
+                // Calculate where the free memory after this block is.
+                pointer_t free_mem_starts_at = (pointer_t)((char*)addr + size);
+                // We know the request address goes here,
+                // but now check if the request address is actually free.
+                if (not no_addr_specified and req_addr < free_mem_starts_at) {
+                    return (pointer_t) 0;
+                }
+                pointer_t allocation_addr = \
+                    req_addr == 0 ? free_mem_starts_at : req_addr;
+                pointer_t allocation_end = (pointer_t)(
+                    (char*)allocation_addr + req_size);
+                // Now make sure we have enough space.
+                bool enough_space_here = allocation_end <= next->addr;
+
+                if (enough_space_here) {
+                    // If we've gotten here, then the address is free, and we have
+                    // enough space. So let's allocate it.
+                    // To do that, make a Node for it, and tuck it between this
+                    // node and the next.
+                    MemoryNode* new_node = new MemoryNode(next, allocation_addr, req_size);
+                    next = new_node;
+                    // And return our allocation address.
+                    return allocation_addr;
+                } else if (req_addr_goes_here) {
+                    // If we don't have enough space here BUT our address
+                    // has to go here, then we can't serve the request,
+                    // so return 0.
+                    return (pointer_t) 0;
+                    // (If our address does not have to go here,
+                    // it will continue searching recursively, as required.)
+                }
+            }
+
+            // Otherwise, "after this node" is not the correct place to
+            // allocate the memory. Move on to the next.
+            return next->place_address(req_size, req_addr);
+        }
+
+        // NB: we don't have a free memory function,
+        // but also this isn't our final address space management algo by far.
+    };
+
+public:
+    AddressSpaceManager() {
+        // Set up the linked list of memory allocations.
+        pointer_t FIRST_ALLOCATABLE_ADDRESS = (pointer_t)((intptr_t)1 << 44);
+        pointer_t DO_NOT_ALLOC_PAST = (pointer_t)((intptr_t)1 << 46);
+        MemoryNode* tail = new MemoryNode(NULL, DO_NOT_ALLOC_PAST, 0);
+        memory_list = new MemoryNode(tail, FIRST_ALLOCATABLE_ADDRESS, 0);
+    }
+    ~AddressSpaceManager() {
+        // TODO
+    }
+
+    // Request to register a chunk of memory.
+    // If addr is specified, attempts to use that exact address.
+    // Returns the address registered. If the request fails, returns 0.
+    pointer_t coordinated_mmap(size_t size, pointer_t addr = 0) {
+        // Implementation notes:
+        // There's a lot of uncertainty about how we want to implement atomic
+        // centralized mmapping.
+        // I think, given what we currently know, the best way is to constrain
+        // the region of addresses where coordinated chunks of memory can be
+        // put. In other words, we must always consciously pick, from some
+        // fixed range, an address that looks free, and pass it into mmap.
+        // The reason for this is that there is a problem with bare (addr=0)
+        // calls to mmap (EVEN IF we mmap coordinated allocations across all
+        // machines); the address returned will almost always be from the
+        // mmap heap (near the bottom of the address space) and thus will
+        // almost certainly not be free on other machines.
+        // However, this is still not perfect; it is always possible that
+        // a noncoordinated allocation somehow ended up intruding into our
+        // coordinated allocation space. So we must still check to see if
+        // mmapping this address on all other machines succeeds before
+        // declaring a successful map.
+
+        // Anyway, our current implementation will just be traversing a simple
+        // linked memory list.
+        // Acquire a free address from our address space allocator.
+        pointer_t acquired_addr = memory_list->place_address(size, addr);
+        std::cerr << "place_address(" << size << ", " << addr << ") ";
+        std::cerr << "returned " << acquired_addr << std::endl;
+        if (acquired_addr == 0) {
+            return NULL;
+        }
+        // mmap this address.
+        int prot = PROT_READ | PROT_WRITE;
+        int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+        int fd = -1;
+        off_t offset = 0;
+        pointer_t res = (pointer_t) mmap(
+            (void*)acquired_addr, size, prot, flags, fd, offset);
+        std::cerr << "Did an mmap, returning address " << res;
+        std::cerr << " and error " << strerror(errno) << std::endl;
+
+        return res;
+    }
+
+    // pointer_t coordinated_munmap() {};
+    // We'll have to think about this before we implement it.
+    // Specifically, you can only unmap regions that are currently owned
+    // by you. This will change until we finalize how we do ownwership,
+    // so since we don't really need to free blocks right now let's
+    // leave this unimplemented.
+
+private:
+    // The linked list tracking our memory allocation.
+    MemoryNode* memory_list;
+
+};
+
+std::vector<int, MyAlloc<int> >* new_fixed_addr_vector(
+    void* pool_addr, size_t pool_size
+) {
+    std::vector<int, MyAlloc<int> >* res = \
+        (std::vector<int, MyAlloc<int> >*) pool_addr;
+    void* next = (void*)((char*)pool_addr + sizeof(std::vector<int, MyAlloc<int> >));
+    new((void*)pool_addr) std::vector<int, MyAlloc<int> >(
+        MyAlloc<int>(pool_addr, pool_size, next));
+    return res;
+}
+
+
+
+
+
 
 
 int main(int argc, char **argv) {
@@ -627,12 +936,24 @@ int main(int argc, char **argv) {
         printf("Usage: address port num_of_ops read/write/cas\n");
         return -1;
     }
+
+
+
+    AddressSpaceManager vaddr_manager = AddressSpaceManager();
+
+    void* addr;
+    size_t size = (size_t)1024*1024*200 + 12;
+    addr = (void*)(vaddr_manager.coordinated_mmap(size));
+
+    std::vector<int, MyAlloc<int> >* vec_ptr = \
+        static_cast< std::vector<int, MyAlloc<int>>* >(addr);
+
     printf("staring test\n");
 
     int num_ops = atoi(argv[3]);
     int command = atoi(argv[4]); //0 read, 1 write, 2 CAS
 
-    Coordinator *c1 = new Coordinator(argv[1], argv[2], 0);
+    Coordinator *c1 = new Coordinator(argv[1], argv[2], 0, addr);
     c1->CreateConnection();
     // printf("command was %d\n", atoi(argv[4]));
 
@@ -643,21 +964,21 @@ int main(int argc, char **argv) {
 	   printf("time failed\n");
 	   exit(1);
 	}
-	
+
 	t1=(start.tv_sec * 1000000.0)+(start.tv_usec);
-	
+
 
     for (int i=0; i<num_ops; i++) {
     	char* readinto = (char*)malloc(1024);
     	if (command == 0) {
-			c1->RdmaRead(0, 10, readinto);    		
+			c1->RdmaRead(0, 1024*1024*200 + 12, readinto);
     	} else if (command == 1) {
     		c1->RdmaWrite(0, 10, readinto);
     	}
     }
 
     // while (c1->op_done < (num_ops) ) {}
-    
+
     if(gettimeofday(&end,NULL)) {
 	    printf("time failed\n");
 	    exit(1);
@@ -670,6 +991,11 @@ int main(int argc, char **argv) {
 
 
     printf("%d\n", c1->op_done);
+
+    std::cerr << "vector size: " << vec_ptr->size() << std::endl;
+    for (int i = 0; i < vec_ptr->size(); i++) {
+        std::cerr << "vector[" << i << "] = " << (*vec_ptr)[i] << std::endl;
+    }
 
     c1->callJoin();
     return 0;

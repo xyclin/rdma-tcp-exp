@@ -19,17 +19,17 @@ namespace Draco {
 
 #define DEBUG_LEVEL 2
 
-#define DEBUG(x) do { if (DEBUG_LEVEL) { std::cout << x << endl; } } while(0) 
+#define DEBUG(x) do { if (DEBUG_LEVEL) { std::cout << x << endl; } } while(0)
 
 struct client {
     struct addrinfo *addr;
     struct rdma_cm_event *event = NULL;
     struct rdma_cm_id *conn = NULL;
     struct rdma_event_channel *ec = NULL;
-    
+
     char *address = NULL;
     char *port = NULL;
-    
+
     std::thread event_loop_thread;
     pthread_mutex_t *mutex_conn;
     pthread_cond_t *cv_conn;
@@ -104,9 +104,9 @@ class Coordinator {
             1.  Coordinator(char *address, char *port);
 
                 initializes required client and connection structs
-            
+
             2.  ~Coordinator();
-                
+
                 called by C++ on disconnection, destroys related structs
 
             3.  int RdmaRead(int offset, int size, char* buffer);
@@ -122,7 +122,7 @@ class Coordinator {
                 buffer: malloced buffer from which RDMA reads and writes on remote address specified
 
             5. int RdmaCompSwap(int offset, uint64_t compare, uint64_t swap);
-                
+
                 offset: bytes from top addr from where the read begins
                 compare: uint_64 integer that we are comparing against, if this is equal value will be swapped
                 swap: if condition is met by compare, this uint64_t will be replaced atomically
@@ -142,7 +142,7 @@ class Coordinator {
         */
 
 
-        Coordinator(char *address, char *port, int node_id);
+        Coordinator(char *address, char *port, int node_id, void* test_addr);
         ~Coordinator();
         int CreateConnection();
         int RdmaRead(int offset, int size, char* buffer);
@@ -191,14 +191,15 @@ private:
     int TIMEOUT_IN_MS = 500; /* ms */
     const int CQ_QUEUE_SIZE = 1024;
     const int RDMA_BUFFER_SIZE = 1024*1024*200 + 12;
+    const void* test_addr;
     int node_id;
     //class variables
     client *c;
-    
+
     pthread_mutex_t mutex_conn_new;
     pthread_cond_t cv_conn_new;
     std::thread* event_thread;
-    
+
     int connected_ = 0;
 
     struct context* s_ctx = NULL;

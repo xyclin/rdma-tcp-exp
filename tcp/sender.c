@@ -5,7 +5,7 @@
 
 #define MYPORT 3490
 #define SIZE_TO_SEND 10
-#define MY_IP "172.19.18.72"
+#define MY_IP "10.0.3.7"
 
 int main(int argc, char *argv[]) {
 
@@ -18,7 +18,7 @@ int main(int argc, char *argv[]) {
  int sin_size = sizeof(my_addr),i,k,num_packet_sent,optval;
  double t1,t2;
 
- //open TCP socket,bind and accept RECEIVERS connections 
+ //open TCP socket,bind and accept RECEIVERS connections
  if( (sockfd = socket(PF_INET, SOCK_STREAM, 0)) ==-1){
   perror("socket error");
   exit(1);
