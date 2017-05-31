@@ -8,13 +8,14 @@
 #include <iostream>
 #include <limits>
 #include <vector>
+#include <list>
 
 
 using namespace Draco;
 
 
 template <class T>
-class MyAlloc {
+class FixedAddrAllocator {
 public:
     // type definitions
     typedef T        value_type;
@@ -27,7 +28,7 @@ public:
     // rebind allocator to type U
     template <class U>
     struct rebind {
-        typedef MyAlloc<U> other;
+        typedef FixedAddrAllocator<U> other;
     };
     // return address of values
     pointer address (reference value) const {
@@ -40,11 +41,11 @@ public:
      * - nothing to do because the allocator has no state
      */
 
-    MyAlloc() throw() {
+    FixedAddrAllocator() throw() {
         std::cerr << "NOARGS MYALLOC CALLED" << std::endl;
     }
-    // MyAlloc() throw() {
-    MyAlloc(void* pool_addr, size_t pool_size, void* next) throw() {
+    // FixedAddrAllocator() throw() {
+    FixedAddrAllocator(void* pool_addr, size_t pool_size, void* next) throw() {
         // (Note: This is just for testing memory access patterns.
         // When we actually make this, we should have the constructor
         // access some pool structure, which determines the specific
@@ -59,15 +60,19 @@ public:
         this->next = next;
     }
 
-    MyAlloc(const MyAlloc& other) throw() {
+    FixedAddrAllocator(const FixedAddrAllocator& other) throw() {
         pool_addr = other.pool_addr;
         pool_size = other.pool_size;
         next = other.next;
     }
 
-    template <class U> MyAlloc (const MyAlloc<U>&) throw() {}
+    template <class U> FixedAddrAllocator (const FixedAddrAllocator<U>& other) throw() {
+        pool_addr = other.pool_addr;
+        pool_size = other.pool_size;
+        next = other.next;
+    }
 
-    ~MyAlloc() throw() {}
+    ~FixedAddrAllocator() throw() {}
 
     // return maximum number of elements that can be allocated
     size_type max_size () const throw() {
@@ -109,7 +114,8 @@ public:
         std::cerr << "(This is currently a no-op.)" << std::endl;
     }
 
-private:
+// TODO: do something about allocator state -.-
+public:
     void* pool_addr;
     size_t pool_size;
     void* next;
@@ -117,13 +123,13 @@ private:
 
 // Disable equality comparisons for now.
 template <class T1, class T2>
-bool operator== (const MyAlloc<T1>&,
-                 const MyAlloc<T2>&) throw() {
+bool operator== (const FixedAddrAllocator<T1>&,
+                 const FixedAddrAllocator<T2>&) throw() {
     return false;
 }
 template <class T1, class T2>
-bool operator!= (const MyAlloc<T1>&,
-                 const MyAlloc<T2>&) throw() {
+bool operator!= (const FixedAddrAllocator<T1>&,
+                 const FixedAddrAllocator<T2>&) throw() {
     return true;
 }
 
@@ -295,14 +301,37 @@ private:
 
 };
 
-std::vector<int, MyAlloc<int> >* new_fixed_addr_vector(
+
+// This only works with containers that take exactly two template arguments
+// e.g. not map, set, etc.
+// There is no way to generalize the number of template arguments in C++98,
+// so the only solution for the other types is to make their own functions,
+// overloading-style (and at that point it's probably best to just get rid of
+// the template entirely). Since this is unwieldly, we'll leave it like this
+// and move on to the C++11 implementation, where we bring in scoped
+// allocators.
+template <
+    typename T,
+    template<typename type_arg, typename alloc_arg> class container_tm >
+container_tm< T, FixedAddrAllocator<T> >* new_fixed_addr_container(
     void* pool_addr, size_t pool_size
 ) {
-    std::vector<int, MyAlloc<int> >* res = \
-        (std::vector<int, MyAlloc<int> >*) pool_addr;
-    void* next = (void*)((char*)pool_addr + sizeof(std::vector<int, MyAlloc<int> >));
-    new((void*)pool_addr) std::vector<int, MyAlloc<int> >(
-        MyAlloc<int>(pool_addr, pool_size, next));
+    // These type names are really messy.
+    // We'll use cont_t for the container type which we wish to allocate,
+    // which is template-constructed from our container_tm argument.
+    typedef container_tm< T, FixedAddrAllocator<T> > cont_t;
+
+    // We'll place the object itself on the given address,
+    // so we'll just return the given address.
+    cont_t* res = static_cast<cont_t*>(pool_addr);
+    // Since we've used up some of our pool space with our object,
+    // we must tell the allocator it can't use this space.
+    void* next = (void*)((char*)pool_addr + sizeof(cont_t));
+    // Now construct the object, with the allocator, and place it
+    // at the address given.
+    new((void*)pool_addr) cont_t(
+        FixedAddrAllocator<int>(pool_addr, pool_size, next));
+
     return res;
 }
 
@@ -317,11 +346,29 @@ int main(int argc, char** argv) {
     void* addr;
     size_t size = (size_t)1024*1024*200 + 12;
     addr = (void*)(vaddr_manager.coordinated_mmap(size));
-    std::vector<int, MyAlloc<int> >* vec_ptr = new_fixed_addr_vector(addr, size);
 
-    for (int i = 0; i < 50; i++) {
-    	vec_ptr->push_back(i);
+    std::list<int, FixedAddrAllocator<int> >* list_ptr;
+    list_ptr = new_fixed_addr_container<int, std::list>(addr, size);
+
+    for (int i = 0; i < 30; i++) {
+    	list_ptr->push_back(i);
     }
+
+    std::cerr << "List created on remote server." << std::endl;
+    std::cerr << "List size: " << list_ptr->size() << std::endl;
+    std::cerr << "List contents: ";
+    for (
+        std::list<int, FixedAddrAllocator<int> >::iterator i = list_ptr->begin();
+        i != list_ptr->end();
+    ) {
+        std::cerr << *i;
+        if (++i != list_ptr->end()) {
+            std::cerr << ", ";
+        } else {
+            std::cerr << std::endl;
+        }
+    }
+
 
 	MemoryServer srv((const char*) argv[1], addr);// = new MemoryServer();// = new MemoryServer();
 	srv.CreateConnection();
